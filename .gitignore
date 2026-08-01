@@ -21,7 +21,10 @@ build/
 # Playwright
 playwright-report/
 test-results/
-
+# Pause
+pause.txt
+# Coverage
+coverage/
 # IDE
 .vscode/
 .idea/

@@ -1,486 +1,313 @@
 import { chromium } from "playwright";
-import * as cheerio from "cheerio";
+import { URL } from "node:url";
 
-export async function scrapeWebsite(url) {
+import config from "../config/config.js";
+import logger from "./logger.js";
+import { shouldProcessImage } from "./imageFilter.js";
 
-    const browser =
-        await chromium.launch({
-            headless: true,
+let browser = null;
+
+async function getBrowser() {
+  if (browser?.isConnected()) return browser;
+
+  browser = await chromium.launch({
+    headless: config.browser.headless,
+    args: [
+      "--disable-dev-shm-usage",
+      "--disable-blink-features=AutomationControlled",
+      "--no-sandbox",
+    ],
+  });
+
+  browser.once("disconnected", () => {
+    browser = null;
+  });
+
+  return browser;
+}
+
+export async function closeBrowser() {
+  if (!browser) return;
+
+  try {
+    await browser.close();
+  } finally {
+    browser = null;
+  }
+}
+
+async function newPage() {
+  const context = await (await getBrowser()).newContext({
+    viewport: { width: 1440, height: 900 },
+    userAgent:
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136 Safari/537.36",
+  });
+
+  const page = await context.newPage();
+
+  page.setDefaultNavigationTimeout(config.browser.navigationTimeout);
+  page.setDefaultTimeout(config.browser.timeout);
+
+  return { context, page };
+}
+
+// ---------- Page Interaction ----------
+
+async function autoScroll(page) {
+  await page.evaluate(async () => {
+    await new Promise((resolve) => {
+      let previousHeight = 0;
+      let stableCount = 0;
+
+      const timer = setInterval(() => {
+        window.scrollBy(0, window.innerHeight);
+
+        const currentHeight = Math.max(
+          document.body.scrollHeight,
+          document.documentElement.scrollHeight
+        );
+
+        if (currentHeight === previousHeight) {
+          stableCount++;
+        } else {
+          stableCount = 0;
+          previousHeight = currentHeight;
+        }
+
+        if (stableCount >= 3) {
+          clearInterval(timer);
+          window.scrollTo(0, 0);
+          resolve();
+        }
+      }, 200);
+    });
+  });
+}
+
+async function clickElements(page, selectors) {
+  for (const selector of selectors) {
+    const elements = await page.$$(selector);
+
+    for (const element of elements) {
+      try {
+        await element.scrollIntoViewIfNeeded();
+        await element.click({
+          timeout: config.browser.clickDelay,
         });
 
-    const page =
-        await browser.newPage({
+        await page.waitForTimeout(config.browser.clickDelay);
+      } catch {}
+    }
+  }
+}
 
-            userAgent:
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        });
+async function expandInteractiveContent(page) {
+  await clickElements(page, [
+    "button",
+    "[role='button']",
+    "summary",
+    "[aria-expanded='false']",
+    "[data-toggle]",
+    "[data-bs-toggle]",
+    ".accordion-button",
+    ".accordion-header",
+    ".accordion-title",
+    ".faq",
+    ".faq-question",
+    ".expand",
+    ".dropdown-toggle",
+    ".elementor-tab-title",
+    ".elementor-accordion-title",
+  ]);
 
-    console.log("Opening Page...");
-
-    await page.goto(url, {
-
-        waitUntil:
-            "domcontentloaded",
-
-        timeout:
-            120000,
+  await page.evaluate(() => {
+    document.querySelectorAll("details").forEach((item) => {
+      item.open = true;
     });
 
-    console.log(
-        "Page Loaded:"
-    );
-
-    console.log(
-        page.url()
-    );
-
-    // ==========================
-    // SAFE AUTO SCROLL
-    // ==========================
-
-    console.log(
-        "Starting Scroll..."
-    );
-
-    for (
-        let i = 0;
-        i < 20;
-        i++
-    ) {
-
-        await page.mouse.wheel(
-            0,
-            1000
+    document
+      .querySelectorAll("[aria-expanded='false']")
+      .forEach((element) => {
+        element.dispatchEvent(
+          new MouseEvent("click", { bubbles: true })
         );
+      });
+  });
 
-        await page.waitForTimeout(
-            200
-        );
-    }
+  await page.waitForTimeout(500);
+}
 
-    console.log(
-        "Scroll Finished"
-    );
+function normalize(text = "") {
+  return text.replace(/\s+/g, " ").trim();
+}
 
-    // ==========================
-    // HOVER MENUS
-    // ==========================
+// ---------- Page Extraction ----------
 
-    // try {
+async function extractPageData(page, pageUrl) {
+  return page.evaluate((baseUrl) => {
+    const normalize = (text = "") =>
+      text.replace(/\s+/g, " ").trim();
 
-    //     console.log(
-    //         "Starting Hover..."
-    //     );
+    const absoluteUrl = (src) => {
+      try {
+        return new URL(src, baseUrl).href;
+      } catch {
+        return null;
+      }
+    };
 
-    //     const navItems =
-    //         (
-    //             await page
-    //                 .locator(
-    //                     "header a, nav a"
-    //                 )
-    //                 .all()
-    //         ).slice(
-    //             0,
-    //             30
-    //         );
-
-    //     console.log(
-    //         "Nav Items:",
-    //         navItems.length
-    //     );
-
-    //     for (
-    //         const item
-    //         of navItems
-    //     ) {
-
-    //         try {
-
-    //             await item.hover();
-
-    //             await page.waitForTimeout(
-    //                 500
-    //             );
-
-    //         } catch {}
-    //     }
-
-    //     console.log(
-    //         "Hover Finished"
-    //     );
-
-    // } catch (err) {
-
-    //     console.log(
-    //         "Hover Error:",
-    //         err.message
-    //     );
-    // }
-
-    // ==========================
-    // BUTTONS
-    // ==========================
-
-    try {
-
-        console.log(
-            "Starting Button Clicks..."
-        );
-
-        const buttons =
-            (
-                await page
-                    .locator(
-                        "button"
-                    )
-                    .all()
-            ).slice(
-                0,
-                30
-            );
-
-        console.log(
-            "Buttons:",
-            buttons.length
-        );
-
-        for (
-            const btn
-            of buttons
-        ) {
-
-            try {
-
-                await btn.click({
-
-                    timeout:
-                        300,
-                });
-
-            } catch {}
-        }
-
-        console.log(
-            "Button Clicks Finished"
-        );
-
-    } catch {}
-    
-    // ==========================
-    // ACCORDIONS
-    // ==========================
-
-    const clickableSelectors = [
-
-        "[aria-expanded='false']",
-
-        ".accordion",
-
-        ".faq",
-
-        ".expand",
-
-        ".dropdown-toggle",
-
-        ".elementor-tab-title",
-
-        ".elementor-accordion-title",
-
-        "[role='button']",
+    const contentSelectors = [
+      "main",
+      "article",
+      "[role='main']",
+      ".content",
+      ".main-content",
+      "#content",
+      "#main",
+      "body",
     ];
-
-    for (
-        const selector
-        of clickableSelectors
-    ) {
-
-        try {
-
-            const elements =
-                (
-                    await page
-                        .locator(
-                            selector
-                        )
-                        .all()
-                ).slice(
-                    0,
-                    20
-                );
-
-            for (
-                const element
-                of elements
-            ) {
-
-                try {
-
-                    await element.click({
-
-                        timeout:
-                            300,
-                    });
-
-                } catch {}
-            }
-
-        } catch {}
-    }
-
-    await page.waitForTimeout(
-        1000
-    );
-
-    // ==========================
-    // HTML
-    // ==========================
-
-    console.log(
-        "Extracting HTML..."
-    );
-
-    const html =
-        await page.content();
-
-    const title =
-        await page.title();
-
-    await browser.close();
-
-    const $ =
-        cheerio.load(html);
-
-    // ==========================
-    // REMOVE NOISE
-    // ==========================
-
-    $(
-        `
-        script,
-        style,
-        noscript,
-        footer,
-        aside,
-        form,
-        svg
-        `
-    ).remove();
-
-    // ==========================
-    // HEADINGS
-    // ==========================
-
-    const headings = [];
-
-    $("h1,h2,h3").each(
-        (i, el) => {
-
-            const heading =
-                $(el)
-                    .text()
-                    .trim();
-
-            if (
-                heading.length > 0
-            ) {
-
-                headings.push(
-                    heading
-                );
-            }
-        }
-    );
-
-    // ==========================
-    // CONTENT
-    // ==========================
 
     let text = "";
 
-    const contentSelectors = [
+    for (const selector of contentSelectors) {
+      const element = document.querySelector(selector);
 
-        "main",
+      if (!element) continue;
 
-        "article",
+      const content = normalize(element.innerText);
 
-        "[role='main']",
-
-        ".content",
-
-        ".main-content",
-
-        "#content",
-
-        "#main",
-
-        "body",
-    ];
-
-    for (
-        const selector
-        of contentSelectors
-    ) {
-
-        const element =
-            $(selector);
-
-        if (
-            !element.length
-        ) {
-
-            continue;
-        }
-
-        const extractedText =
-            element.text();
-
-        if (
-
-            extractedText &&
-            extractedText.trim().length > 500
-
-        ) {
-
-            text =
-                extractedText;
-
-            console.log(
-                `Using selector: ${selector}`
-            );
-
-            break;
-        }
+      if (content.length > 500) {
+        text = content;
+        break;
+      }
     }
 
-    text =
-        text
+    const headings = [
+      ...document.querySelectorAll("h1,h2,h3,h4,h5,h6"),
+    ]
+      .map((heading) => normalize(heading.innerText))
+      .filter(Boolean);
 
-        .replace(
-            /\s+/g,
-            " "
-        )
+    const images = [...document.images]
+      .map((img) => ({
+        src:
+          img.currentSrc ||
+          img.src ||
+          img.dataset.src ||
+          img.dataset.lazy ||
+          img.dataset.original ||
+          img.getAttribute("data-src") ||
+          img.getAttribute("data-lazy-src") ||
+          img.getAttribute("data-original") ||
+          img
+            .getAttribute("srcset")
+            ?.split(",")[0]
+            ?.trim()
+            ?.split(" ")[0] ||
+          "",
+        alt: normalize(img.alt),
+        width: img.naturalWidth || img.width || 0,
+        height: img.naturalHeight || img.height || 0,
+      }))
+      .map((img) => ({
+        ...img,
+        src: absoluteUrl(img.src),
+      }))
+      .filter((img) => img.src);
 
-        .trim();
+    return {
+      text,
+      headings,
+      images,
+    };
+  }, pageUrl);
+}
 
-    // ==========================
-    // IMAGES
-    // ==========================
+function filterImages(images) {
+  const seen = new Set();
 
-    const images = [];
+  return images.filter((image) => {
+    if (
+      !shouldProcessImage(
+        image.src,
+        image.width,
+        image.height
+      )
+    ) {
+      return false;
+    }
 
-    $("img").each(
-        (i, el) => {
+    if (seen.has(image.src)) {
+      return false;
+    }
 
-            let src =
-                $(el).attr(
-                    "src"
-                );
+    seen.add(image.src);
 
-            if (!src) {
+    return true;
+  });
+}
 
-                return;
-            }
+// ---------- Main Scraper ----------
 
-            src =
-                src.trim();
+export async function scrape(url) {
+  const { context, page } = await newPage();
 
-            const lower =
-                src.toLowerCase();
+  try {
+    logger.info(`Scraping → ${url}`);
 
-            if (
+    await page.goto(url, {
+      waitUntil: "networkidle",
+      timeout: config.browser.navigationTimeout,
+    });
 
-                lower.includes(
-                    "logo"
-                ) ||
+    await autoScroll(page);
+    await expandInteractiveContent(page);
+    await autoScroll(page);
 
-                lower.includes(
-                    "icon"
-                ) ||
+    const {
+      text,
+      headings,
+      images,
+    } = await extractPageData(page, url);
 
-                lower.includes(
-                    "avatar"
-                ) ||
+    const title = normalize(await page.title());
 
-                lower.includes(
-                    "spinner"
-                ) ||
+    const filteredImages = filterImages(images);
 
-                lower.includes(
-                    "loader"
-                )
-
-            ) {
-
-                return;
-            }
-
-            if (
-
-                lower.includes(
-                    ".png"
-                ) ||
-
-                lower.includes(
-                    ".jpg"
-                ) ||
-
-                lower.includes(
-                    ".jpeg"
-                ) ||
-
-                lower.includes(
-                    ".webp"
-                )
-
-            ) {
-
-                images.push(
-                    src
-                );
-            }
-        }
+    logger.success(
+      `Completed → ${title || url}`
     );
 
-    const uniqueImages =
-        [...new Set(images)];
-
-    console.log(
-        "\n=========================="
-    );
-
-    console.log(
-        "Title:",
-        title
-    );
-
-    console.log(
-        "Text Length:",
-        text.length
-    );
-
-    console.log(
-        "Headings:",
-        headings.length
-    );
-
-    console.log(
-        "Images Found:",
-        uniqueImages.length
-    );
-
-    console.log(
-        "==========================\n"
+    logger.info(
+      `Content: ${text.length} chars | Headings: ${headings.length} | Images: ${filteredImages.length}`
     );
 
     return {
-
-        title,
-
-        headings,
-
-        text,
-
-        images:
-            uniqueImages,
+      url,
+      title,
+      text,
+      headings: [...new Set(headings)],
+      images: filteredImages,
     };
+  } catch (error) {
+    logger.error(`Scrape failed → ${url}`);
+    logger.error(error.message);
+
+    return {
+      url,
+      title: "",
+      text: "",
+      headings: [],
+      images: [],
+      error: error.message,
+    };
+  } finally {
+    await context.close().catch(() => {});
+  }
 }
+
+export default {
+  scrape,
+  closeBrowser,
+};
+

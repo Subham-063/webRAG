@@ -1,28 +1,49 @@
 import OpenAI from "openai";
-import dotenv from "dotenv";
 
-dotenv.config();
+import config from "../config/config.js";
+import logger from "./logger.js";
 
 const client = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
+  apiKey: process.env.OPENAI_API_KEY,
 });
 
 export async function createEmbedding(text) {
+  try {
+    const {
+      data: [{ embedding }],
+    } = await client.embeddings.create({
+      model: config.EMBEDDING_MODEL,
+      input: text.slice(0, config.MAX_EMBEDDING_LENGTH),
+    });
 
-    const response =
-        await client.embeddings.create({
+    return embedding;
+  } catch (error) {
+    logger.error("Embedding generation failed");
+    throw error;
+  }
+}
 
-            model:
-                "text-embedding-3-small",
+export async function createEmbeddings(texts = []) {
+  if (!texts.length) return [];
 
-            input:
-                text.slice(
-                    0,
-                    8000
-                ),
-        });
+  const embeddings = [];
 
-    return response
-        .data[0]
-        .embedding;
+  for (
+    let i = 0;
+    i < texts.length;
+    i += config.EMBEDDING_BATCH_SIZE
+  ) {
+    const batch = texts.slice(
+      i,
+      i + config.EMBEDDING_BATCH_SIZE
+    );
+
+    const results = await Promise.all(
+      batch.map(createEmbedding)
+    );
+
+    embeddings.push(...results);
+  }
+
+  return embeddings;
 }

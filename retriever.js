@@ -1,170 +1,135 @@
 import dotenv from "dotenv";
-dotenv.config();
-
 import { MongoClient } from "mongodb";
+
+import config from "./config/config.js";
+import logger from "./utils/logger.js";
+
 import { createEmbedding } from "./utils/embedding.js";
 import { rerankDocuments } from "./utils/reranker.js";
 
+dotenv.config();
+
+let client;
+let collection;
+
+async function connectDatabase() {
+  if (collection) return collection;
+
+  client = new MongoClient(process.env.MONGODB_URI);
+
+  await client.connect();
+
+  collection = client
+    .db(process.env.DB_NAME)
+    .collection(process.env.COLLECTION_NAME);
+
+  return collection;
+}
+
+export async function closeRetriever() {
+  if (!client) return;
+
+  await client.close();
+  client = null;
+  collection = null;
+}
 
 export async function retrieveDocuments(query) {
+  const db = await connectDatabase();
 
-    const client =
-        new MongoClient(
-            process.env.MONGODB_URI
-        );
+  logger.info("Generating query embedding...");
 
-    await client.connect();
+  const queryEmbedding = await createEmbedding(query);
 
-    const collection =
-        client
-        .db(
-            process.env.DB_NAME
-        )
-        .collection(
-            process.env.COLLECTION_NAME
-        );
+  logger.info("Running vector search...");
 
-    const queryEmbedding =
-        await createEmbedding(query);
+  const vectorResults = await db
+    .aggregate([
+      {
+        $vectorSearch: {
+          index: process.env.INDEX_NAME,
+          path: "embedding",
+          queryVector: queryEmbedding,
+          numCandidates: config.VECTOR_CANDIDATES,
+          limit: config.VECTOR_LIMIT,
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          title: 1,
+          headings: 1,
+          pageType: 1,
+          text: 1,
+          url: 1,
+          score: {
+            $meta: "vectorSearchScore",
+          },
+        },
+      },
+    ])
+    .toArray();
 
-    // ==========================
-    // VECTOR SEARCH
-    // ==========================
+  logger.info("Running keyword search...");
 
-    const vectorResults =
-        await collection.aggregate([
+  let keywordResults = [];
 
-            {
-                $vectorSearch: {
-
-                    index:
-                        process.env.INDEX_NAME,
-
-                    path:
-                        "embedding",
-
-                    queryVector:
-                        queryEmbedding,
-
-                    numCandidates:
-                        300,
-
-                    limit:
-                        15,
-                },
+  try {
+    keywordResults = await db
+      .find(
+        {
+          $text: {
+            $search: query,
+          },
+        },
+        {
+          projection: {
+            _id: 0,
+            title: 1,
+            headings: 1,
+            pageType: 1,
+            text: 1,
+            url: 1,
+            score: {
+              $meta: "textScore",
             },
-
-            {
-                $project: {
-
-                    _id: 0,
-                    title: 1,
-                    headings: 1,
-                    pageType: 1,
-                    text: 1,
-                    url: 1,
-                    score: { $meta: "vectorSearchScore", },
-                },
-            },
-        ]).toArray();
-
-    // ==========================
-    // KEYWORD SEARCH
-    // ==========================
-
-    let keywordResults = [];
-
-    try {
-
-        keywordResults =
-            await collection.find(
-
-                {
-                    $text: {
-                        $search: query
-                    }
-                },
-
-                {
-                    projection: {
-
-                        _id: 0,
-
-                        title: 1,
-
-                        pageType: 1,
-
-                        text: 1,
-
-                        url: 1,
-
-                        score: {
-                            $meta:
-                                "textScore"
-                        }
-                    }
-                }
-
-            )
-            .sort({
-                score: {
-                    $meta:
-                        "textScore"
-                }
-            })
-            .limit(15)
-            .toArray();
-
-    } catch (err) {
-
-        console.log(
-            "Text Search Unavailable"
-        );
-    }
-
-    // ==========================
-    // MERGE RESULTS
-    // ==========================
-
-    const merged =
-        [
-            ...vectorResults,
-            ...keywordResults,
-        ];
-
-    const unique =
-        [];
-
-    const seen =
-        new Set();
-
-    for (
-        const doc
-        of merged
-    ) {
-
-        const key =
-            doc.text
-                .slice(0, 200);
-
-        if (
-            seen.has(key)
-        ) {
-            continue;
+          },
         }
+      )
+      .sort({
+        score: {
+          $meta: "textScore",
+        },
+      })
+      .limit(config.KEYWORD_LIMIT)
+      .toArray();
+  } catch {
+    logger.warn("Text search unavailable");
+  }
 
-        seen.add(key);
+  logger.info("Merging search results...");
 
-        unique.push(doc);
-    }
+  const merged = [...vectorResults, ...keywordResults];
 
-    await client.close();
+  const unique = [];
+  const seen = new Set();
 
-    const reranked =
-    await rerankDocuments(
-        query,
-        unique
-    );
+  for (const doc of merged) {
+    const key = `${doc.url}:${doc.text.length}:${doc.text.slice(0, 80)}`;
 
-return reranked;
+    if (seen.has(key)) continue;
+
+    seen.add(key);
+    unique.push(doc);
+  }
+
+  logger.info(`Retrieved ${unique.length} unique document(s)`);
+
+  const reranked = await rerankDocuments(query, unique);
+
+  logger.success(
+    `Returning ${reranked.length} reranked document(s)`
+  );
+
+  return reranked;
 }

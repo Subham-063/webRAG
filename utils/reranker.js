@@ -1,27 +1,21 @@
 import OpenAI from "openai";
-import dotenv from "dotenv";
 
-dotenv.config();
+import config from "../config/config.js";
+import logger from "./logger.js";
 
-const client =
-    new OpenAI({
-        apiKey:
-            process.env.OPENAI_API_KEY,
-    });
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
-export async function rerankDocuments(
-    query,
-    docs
-) {
+export async function rerankDocuments(query, documents = []) {
+  if (!documents.length) return [];
 
-    const docsText =
-        docs.map(
-            (
-                doc,
-                index
-            ) =>
+  logger.info("Reranking retrieved documents...");
 
-                `${index}
+  const docsText = documents
+    .map(
+      (doc, index) => `
+${index}
 
 TITLE:
 ${doc.title}
@@ -29,76 +23,59 @@ ${doc.title}
 CONTENT:
 ${doc.text.slice(0, 500)}
 `
-        ).join("\n\n");
+    )
+    .join("\n");
 
-    const response =
-        await client.chat.completions.create({
+  try {
+    const response = await client.chat.completions.create({
+      model: config.RERANK_MODEL,
 
-            model:
-                "gpt-4.1-mini",
+      temperature: 0,
 
-            messages: [
+      messages: [
+        {
+          role: "system",
+          content: `You are a document reranker.
 
-                {
-                    role:
-                        "system",
+Given a user query and a list of retrieved documents,
+return ONLY the indexes of the 8 most relevant documents.
 
-                    content:
-`You are a document reranker.
+Output format:
 
-Given a user query and document list,
-return only the indexes of the
-8 most relevant documents.
+3,1,7,2
 
-Output ONLY comma separated indexes.
-
-Example:
-
-3,1,7,2`
-                },
-
-                {
-                    role:
-                        "user",
-
-                    content:
-`
+Do not explain your answer.`,
+        },
+        {
+          role: "user",
+          content: `
 QUESTION:
 ${query}
 
 DOCUMENTS:
 
 ${docsText}
-`
-                }
-            ],
+`,
+        },
+      ],
+    });
 
-            temperature: 0
-        });
+    const indexes = response.choices[0].message.content
+      .split(",")
+      .map((value) => Number.parseInt(value.trim(), 10))
+      .filter(Number.isInteger);
 
-    const indexes =
-        response
-        .choices[0]
-        .message
-        .content
-        .split(",")
+    const reranked = indexes
+      .map((index) => documents[index])
+      .filter(Boolean);
 
-        .map(
-            x =>
-                parseInt(
-                    x.trim()
-                )
-        )
+    logger.success(
+      `Reranked ${reranked.length} document(s)`
+    );
 
-        .filter(
-            x =>
-                !isNaN(x)
-        );
-
-    return indexes
-        .map(
-            i =>
-                docs[i]
-        )
-        .filter(Boolean);
+    return reranked;
+  } catch (error) {
+    logger.warn("Reranker failed. Returning original documents.");
+    return documents;
+  }
 }

@@ -1,16 +1,26 @@
 {
-  "name": "rag-nodejs",
-  "version": "1.0.0",
+  "name": "webRAG",
+  "version": "2.0.0",
+  "description": "AI-powered Retrieval-Augmented Generation system for transforming websites and documents into a searchable knowledge base.",
   "type": "module",
-  "main": "index.js",
+  "main": "ask.js",
   "scripts": {
     "ingest": "node ingestion.js",
     "ask": "node ask.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
+  "keywords": [
+    "rag",
+    "langchain",
+    "llm",
+    "mongodb",
+    "vector-search",
+    "playwright",
+    "ocr",
+    "openai",
+    "semantic-search"
+  ],
+  "author": "Subham Jha",
+  "license": "MIT",
   "dependencies": {
     "@langchain/community": "0.3.42",
     "@langchain/core": "0.3.79",
